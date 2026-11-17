@@ -29,6 +29,10 @@ import {
   saveDownloadedTrack,
 } from './lib/db';
 import {
+  filterBuiltInCatalog,
+  getCatalogByGenre,
+} from './lib/catalog';
+import {
   GENRES,
   getOrCreateDeviceId,
   isDeviceFreeDownloadClaimed,
@@ -73,16 +77,17 @@ export default function App() {
 
   // Music Feed & Search State
   const [selectedGenre, setSelectedGenre] = useState<GenreId>('tout');
+  const [activeGenre, setActiveGenre] = useState<GenreId | undefined>('tout');
   const [searchInput, setSearchInput] = useState('');
   const [activeQuery, setActiveQuery] = useState(GENRES[0].query);
-  const [tracks, setTracks] = useState<Track[]>([]);
+  const [tracks, setTracks] = useState<Track[]>(() => getCatalogByGenre('tout'));
   const [loadingTracks, setLoadingTracks] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const isFetchingMoreRef = useRef(false);
+  const searchSeqRef = useRef(0);
 
   // Player & Queue State
   const [queue, setQueue] = useState<Track[]>([]);
@@ -202,32 +207,62 @@ export default function App() {
     }
   }, [user?.email, syncUserStatus]);
 
-  // Fetch initial page of tracks whenever activeQuery changes
-  const fetchTracks = useCallback(async (query: string) => {
-    setLoadingTracks(true);
-    setSearchError(null);
+  // Fetch initial page of tracks with instant built-in catalog seeding + YouTube/Invidious/Piped fallback
+  const fetchTracks = useCallback(async (query: string, genreId?: GenreId) => {
+    const reqSeq = ++searchSeqRef.current;
+    const instantCatalog = genreId ? getCatalogByGenre(genreId) : filterBuiltInCatalog(query);
+
+    if (instantCatalog.length > 0) {
+      setTracks(instantCatalog);
+      setLoadingTracks(false);
+    } else {
+      setLoadingTracks(true);
+    }
+
     setNextPageToken(null);
     setHasMore(false);
     isFetchingMoreRef.current = false;
+
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      const genreQuery = genreId ? `&genre=${encodeURIComponent(genreId)}` : '';
+      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}${genreQuery}`);
       if (!res.ok) throw new Error('Search failed');
       const data = (await res.json()) as {
         tracks?: Track[];
         nextPageToken?: string | null;
         hasMore?: boolean;
       };
-      const fetched = data.tracks || [];
-      setTracks(fetched);
+      if (reqSeq !== searchSeqRef.current) return;
+
+      const live = data.tracks || [];
+      const seen = new Set<string>();
+      const combined: Track[] = [];
+      for (const t of live) {
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          combined.push(t);
+        }
+      }
+      for (const t of instantCatalog) {
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          combined.push(t);
+        }
+      }
+
+      const finalTracks = combined.length > 0 ? combined : getCatalogByGenre(genreId || 'tout');
+      setTracks(finalTracks);
       setNextPageToken(data.nextPageToken || null);
       setHasMore(Boolean(data.hasMore && data.nextPageToken));
-      if (fetched.length === 0) {
-        setSearchError('Pa gen rezilta pou rechèch sa a. Eseye yon lòt atis oswa jan.');
-      }
     } catch {
-      setSearchError('Pa kapab chaje mizik yo kounye a. Tcheke koneksyon entènèt ou.');
+      if (reqSeq !== searchSeqRef.current) return;
+      const fallback = instantCatalog.length > 0 ? instantCatalog : getCatalogByGenre(genreId || 'tout');
+      setTracks(fallback);
+      setHasMore(false);
     } finally {
-      setLoadingTracks(false);
+      if (reqSeq === searchSeqRef.current) {
+        setLoadingTracks(false);
+      }
     }
   }, []);
 
@@ -236,8 +271,9 @@ export default function App() {
     isFetchingMoreRef.current = true;
     setLoadingMore(true);
     try {
+      const genreQuery = activeGenre ? `&genre=${encodeURIComponent(activeGenre)}` : '';
       const res = await fetch(
-        `/api/search?q=${encodeURIComponent(activeQuery)}&pageToken=${encodeURIComponent(nextPageToken)}`
+        `/api/search?q=${encodeURIComponent(activeQuery)}${genreQuery}&pageToken=${encodeURIComponent(nextPageToken)}`
       );
       if (!res.ok) throw new Error('Load more failed');
       const data = (await res.json()) as {
@@ -249,23 +285,30 @@ export default function App() {
       setTracks((prev) => {
         const existingIds = new Set(prev.map((t) => t.id));
         const uniqueNew = incoming.filter((t) => !existingIds.has(t.id));
-        return uniqueNew.length > 0 ? [...prev, ...uniqueNew] : prev;
+        if (uniqueNew.length > 0) return [...prev, ...uniqueNew];
+        const remainingCatalog = getCatalogByGenre('tout').filter((t) => !existingIds.has(t.id));
+        return remainingCatalog.length > 0 ? [...prev, ...remainingCatalog.slice(0, 12)] : prev;
       });
       setNextPageToken(data.nextPageToken || null);
       setHasMore(Boolean(data.hasMore && data.nextPageToken && incoming.length > 0));
     } catch {
-      // Keep existing tracks on transient pagination error
+      setTracks((prev) => {
+        const existingIds = new Set(prev.map((t) => t.id));
+        const remainingCatalog = getCatalogByGenre('tout').filter((t) => !existingIds.has(t.id));
+        return remainingCatalog.length > 0 ? [...prev, ...remainingCatalog.slice(0, 12)] : prev;
+      });
+      setHasMore(false);
     } finally {
       isFetchingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [activeQuery, nextPageToken, loadingTracks]);
+  }, [activeQuery, activeGenre, nextPageToken, loadingTracks]);
 
   useEffect(() => {
     if (user && !user.blocked) {
-      fetchTracks(activeQuery);
+      fetchTracks(activeQuery, activeGenre);
     }
-  }, [user?.id, user?.blocked, activeQuery, fetchTracks]);
+  }, [user?.id, user?.blocked, activeQuery, activeGenre, fetchTracks]);
 
   // IntersectionObserver for seamless infinite scroll pagination
   useEffect(() => {
@@ -406,6 +449,7 @@ export default function App() {
 
   const handleGenreSelect = (genreId: GenreId) => {
     setSelectedGenre(genreId);
+    setActiveGenre(genreId);
     setSearchInput('');
     const found = GENRES.find((g) => g.id === genreId);
     if (found) {
@@ -417,6 +461,7 @@ export default function App() {
     e.preventDefault();
     const q = searchInput.trim();
     if (!q) return;
+    setActiveGenre(undefined);
     setActiveQuery(q);
   };
 
@@ -879,18 +924,7 @@ export default function App() {
             {loadingTracks ? (
               <div className="py-16 flex flex-col items-center justify-center gap-3 text-[#8B9BB4]">
                 <Loader2 className="w-7 h-7 animate-spin text-[#38BDF8]" />
-                <p className="text-sm">Ap chaje plis pase 30 mizik sou YouTube...</p>
-              </div>
-            ) : searchError ? (
-              <div className="rounded-3xl border border-white/[0.08] bg-[#0E1424]/85 backdrop-blur-md p-8 text-center space-y-3">
-                <p className="text-sm text-[#CBD5E1]">{searchError}</p>
-                <button
-                  type="button"
-                  onClick={() => fetchTracks(activeQuery)}
-                  className="min-h-[44px] px-5 rounded-xl bg-[#2563EB] hover:bg-[#1D4ED8] text-xs font-semibold text-white shadow-[0_0_16px_rgba(37,99,235,0.3)] transition-all"
-                >
-                  Eseye Ankò
-                </button>
+                <p className="text-sm">Ap chaje mizik sou YouTube...</p>
               </div>
             ) : (
               <>

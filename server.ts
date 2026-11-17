@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
+import { filterBuiltInCatalog, getCatalogByGenre } from './src/lib/catalog.ts';
+import type { GenreId } from './src/types.ts';
 
 dotenv.config();
 
@@ -368,106 +370,109 @@ const INVIDIOUS_INSTANCES = [
   'https://invidious.nerdvpn.de',
 ];
 
+async function searchSinglePipedInstance(base: string, query: string): Promise<SearchTrackResult[]> {
+  const collected: SearchTrackResult[] = [];
+  const seen = new Set<string>();
+  let nextpage: string | null = null;
+
+  for (let page = 0; page < 2 && collected.length < 36; page++) {
+    const url = nextpage
+      ? `${base}/nextpage/search?q=${encodeURIComponent(query)}&filter=music_songs&nextpage=${encodeURIComponent(nextpage)}`
+      : `${base}/search?q=${encodeURIComponent(query)}&filter=music_songs`;
+    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 4000);
+    if (!res.ok) break;
+    const json = (await res.json()) as {
+      items?: Array<{
+        url?: string;
+        title?: string;
+        uploaderName?: string;
+        duration?: number;
+        thumbnail?: string;
+        views?: number;
+      }>;
+      nextpage?: string | null;
+    };
+    for (const item of json.items || []) {
+      const match = item.url?.match(/[?&]v=([^&]+)/);
+      const vid = match?.[1];
+      if (!vid || seen.has(vid)) continue;
+      const dur = item.duration || 0;
+      if (dur > MAX_TRACK_SECONDS || dur < MIN_TRACK_SECONDS) continue;
+      const title = item.title || 'Untitled Track';
+      if (isLikelyMixtapeTitle(title) && dur > 480) continue;
+      seen.add(vid);
+      collected.push({
+        id: vid,
+        title,
+        artist: (item.uploaderName || 'Unknown Artist').replace(/\s*-\s*Topic$/i, ''),
+        durationSeconds: dur,
+        durationLabel: formatDuration(dur),
+        thumbnail: item.thumbnail || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+        viewCount: formatViews(item.views),
+        source: 'piped',
+      });
+    }
+    nextpage = json.nextpage || null;
+    if (!nextpage) break;
+  }
+
+  if (collected.length === 0) throw new Error('Empty Piped response');
+  return collected;
+}
+
 async function searchPipedApi(query: string): Promise<SearchTrackResult[]> {
-  for (const base of PIPED_INSTANCES) {
-    try {
-      const collected: SearchTrackResult[] = [];
-      const seen = new Set<string>();
-      let nextpage: string | null = null;
+  try {
+    return await Promise.any(PIPED_INSTANCES.map((base) => searchSinglePipedInstance(base, query)));
+  } catch {
+    return [];
+  }
+}
 
-      for (let page = 0; page < 2 && collected.length < 36; page++) {
-        const url = nextpage
-          ? `${base}/nextpage/search?q=${encodeURIComponent(query)}&filter=music_songs&nextpage=${encodeURIComponent(nextpage)}`
-          : `${base}/search?q=${encodeURIComponent(query)}&filter=music_songs`;
-        const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 5500);
-        if (!res.ok) break;
-        const json = (await res.json()) as {
-          items?: Array<{
-            url?: string;
-            title?: string;
-            uploaderName?: string;
-            duration?: number;
-            thumbnail?: string;
-            views?: number;
-          }>;
-          nextpage?: string | null;
-        };
-        for (const item of json.items || []) {
-          const match = item.url?.match(/[?&]v=([^&]+)/);
-          const vid = match?.[1];
-          if (!vid || seen.has(vid)) continue;
-          const dur = item.duration || 0;
-          if (dur > MAX_TRACK_SECONDS || dur < MIN_TRACK_SECONDS) continue;
-          const title = item.title || 'Untitled Track';
-          if (isLikelyMixtapeTitle(title) && dur > 480) continue;
-          seen.add(vid);
-          collected.push({
-            id: vid,
-            title,
-            artist: (item.uploaderName || 'Unknown Artist').replace(/\s*-\s*Topic$/i, ''),
-            durationSeconds: dur,
-            durationLabel: formatDuration(dur),
-            thumbnail: item.thumbnail || `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
-            viewCount: formatViews(item.views),
-            source: 'piped',
-          });
-        }
-        nextpage = json.nextpage || null;
-        if (!nextpage) break;
-      }
-
-      if (collected.length >= 10) return collected;
-    } catch {
-      // Try next Piped instance
+async function searchSingleInvidiousInstance(base: string, query: string): Promise<SearchTrackResult[]> {
+  const collected: SearchTrackResult[] = [];
+  const seen = new Set<string>();
+  for (let page = 1; page <= 2 && collected.length < 36; page++) {
+    const url = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&page=${page}`;
+    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 4000);
+    if (!res.ok) break;
+    const arr = (await res.json()) as Array<{
+      videoId?: string;
+      title?: string;
+      author?: string;
+      lengthSeconds?: number;
+      viewCount?: number;
+    }>;
+    if (!Array.isArray(arr) || arr.length === 0) break;
+    for (const item of arr) {
+      const vid = item.videoId;
+      if (!vid || seen.has(vid)) continue;
+      const dur = item.lengthSeconds || 0;
+      if (dur > MAX_TRACK_SECONDS || dur < MIN_TRACK_SECONDS) continue;
+      const title = item.title || 'Untitled Track';
+      if (isLikelyMixtapeTitle(title) && dur > 480) continue;
+      seen.add(vid);
+      collected.push({
+        id: vid,
+        title,
+        artist: (item.author || 'Unknown Artist').replace(/\s*-\s*Topic$/i, ''),
+        durationSeconds: dur,
+        durationLabel: formatDuration(dur),
+        thumbnail: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+        viewCount: formatViews(item.viewCount),
+        source: 'invidious',
+      });
     }
   }
-  return [];
+  if (collected.length === 0) throw new Error('Empty Invidious response');
+  return collected;
 }
 
 async function searchInvidiousApi(query: string): Promise<SearchTrackResult[]> {
-  for (const base of INVIDIOUS_INSTANCES) {
-    try {
-      const collected: SearchTrackResult[] = [];
-      const seen = new Set<string>();
-      for (let page = 1; page <= 2 && collected.length < 36; page++) {
-        const url = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video&page=${page}`;
-        const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, 5500);
-        if (!res.ok) break;
-        const arr = (await res.json()) as Array<{
-          videoId?: string;
-          title?: string;
-          author?: string;
-          lengthSeconds?: number;
-          viewCount?: number;
-          videoThumbnails?: Array<{ url?: string }>;
-        }>;
-        if (!Array.isArray(arr) || arr.length === 0) break;
-        for (const item of arr) {
-          const vid = item.videoId;
-          if (!vid || seen.has(vid)) continue;
-          const dur = item.lengthSeconds || 0;
-          if (dur > MAX_TRACK_SECONDS || dur < MIN_TRACK_SECONDS) continue;
-          const title = item.title || 'Untitled Track';
-          if (isLikelyMixtapeTitle(title) && dur > 480) continue;
-          seen.add(vid);
-          collected.push({
-            id: vid,
-            title,
-            artist: (item.author || 'Unknown Artist').replace(/\s*-\s*Topic$/i, ''),
-            durationSeconds: dur,
-            durationLabel: formatDuration(dur),
-            thumbnail: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
-            viewCount: formatViews(item.viewCount),
-            source: 'invidious',
-          });
-        }
-      }
-      if (collected.length >= 10) return collected;
-    } catch {
-      // Try next Invidious instance
-    }
+  try {
+    return await Promise.any(INVIDIOUS_INSTANCES.map((base) => searchSingleInvidiousInstance(base, query)));
+  } catch {
+    return [];
   }
-  return [];
 }
 
 async function searchYouTubeWebHtml(query: string): Promise<SearchTrackResult[]> {
@@ -698,13 +703,15 @@ async function startServer() {
     'trending',
   ];
 
-  // Search tracks with YouTube Data API v3 nextPageToken (maxResults=25) & fallback pagination
+  // Search tracks with YouTube Data API v3 first, then parallel Piped/Invidious/Web & built-in catalog fallback
   app.get('/api/search', async (req, res) => {
     const q = String(req.query.q || '').trim() || 'Konpa Haiti hits official audio';
+    const rawGenre = String(req.query.genre || '').trim() as GenreId | '';
+    const genreParam: GenreId | undefined = rawGenre || undefined;
     const rawPageToken = String(req.query.pageToken || '').trim();
-    const cacheKey = `${q.toLowerCase()}::${rawPageToken}`;
+    const cacheKey = `${q.toLowerCase()}::${genreParam || ''}::${rawPageToken}`;
     const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < 5 * 60 * 1000 && cached.tracks.length >= 20) {
+    if (cached && Date.now() - cached.ts < 5 * 60 * 1000 && cached.tracks.length > 0) {
       return res.json({
         tracks: cached.tracks,
         nextPageToken: cached.nextPageToken,
@@ -741,33 +748,55 @@ async function startServer() {
       }
     }
 
-    // If YouTube API didn't return enough or we're on a fallback page token, query Piped/Invidious/Web
+    // If YouTube API failed/quota-exceeded or returned few results, race Piped/Invidious/Web in parallel
     if (merged.length < 22) {
       const modIdx = fallbackPageNum % FALLBACK_QUERY_MODIFIERS.length;
       const mod = FALLBACK_QUERY_MODIFIERS[modIdx];
       const effectiveQuery = mod ? `${q} ${mod}` : q;
 
-      const pipedTracks = await searchPipedApi(effectiveQuery);
-      addTracks(pipedTracks);
+      const [pipedRes, invRes, webRes] = await Promise.allSettled([
+        searchPipedApi(effectiveQuery),
+        searchInvidiousApi(effectiveQuery),
+        searchYouTubeWebHtml(effectiveQuery),
+      ]);
 
-      if (merged.length < 22) {
-        const invTracks = await searchInvidiousApi(effectiveQuery);
-        addTracks(invTracks);
-      }
+      if (pipedRes.status === 'fulfilled') addTracks(pipedRes.value);
+      if (invRes.status === 'fulfilled') addTracks(invRes.value);
+      if (webRes.status === 'fulfilled') addTracks(webRes.value);
 
-      if (merged.length < 22) {
-        const webTracks = await searchYouTubeWebHtml(effectiveQuery);
-        addTracks(webTracks);
-      }
-
-      if (merged.length < 22) {
-        const nextMod = FALLBACK_QUERY_MODIFIERS[(modIdx + 1) % FALLBACK_QUERY_MODIFIERS.length];
-        const webTracks2 = await searchYouTubeWebHtml(`${q} ${nextMod || 'songs'}`);
-        addTracks(webTracks2);
-      }
-
-      if (!nextPageToken && fallbackPageNum < 12) {
+      if (!nextPageToken && fallbackPageNum < 10) {
         nextPageToken = `fb_page:${fallbackPageNum + 1}`;
+      }
+    }
+
+    // Always enrich / fallback with built-in catalog on first page (or when live sources return empty)
+    if (!rawPageToken) {
+      const catalogMatches = filterBuiltInCatalog(q, genreParam);
+      const mappedCatalog: SearchTrackResult[] = catalogMatches.map((t) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        durationSeconds: t.durationSeconds,
+        durationLabel: t.durationLabel,
+        thumbnail: t.thumbnail,
+        viewCount: t.viewCount,
+        source: 'youtube',
+      }));
+      addTracks(mappedCatalog);
+
+      // If still empty (e.g. uncommon query while all external APIs are rate-limited), provide curated catalog
+      if (merged.length === 0) {
+        const curated = getCatalogByGenre(genreParam || 'tout').map((t) => ({
+          id: t.id,
+          title: t.title,
+          artist: t.artist,
+          durationSeconds: t.durationSeconds,
+          durationLabel: t.durationLabel,
+          thumbnail: t.thumbnail,
+          viewCount: t.viewCount,
+          source: 'youtube' as const,
+        }));
+        addTracks(curated);
       }
     }
 
