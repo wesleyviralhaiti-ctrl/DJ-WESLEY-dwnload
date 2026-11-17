@@ -1,0 +1,6 @@
+{
+  "name": "WESLEY MUSIC DOWNLOAD",
+  "description": "Sleek dark-mode music streaming and offline MP3 downloader for Konpa, Raboday, Amapiano, Drill, Afrobeat, Rap Kreyol, and global hits.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

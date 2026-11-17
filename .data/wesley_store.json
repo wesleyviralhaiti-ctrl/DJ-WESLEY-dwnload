@@ -1,0 +1,66 @@
+{
+  "users": [],
+  "payments": [],
+  "vipCodes": [
+    {
+      "code": "WES-1001",
+      "plan": "monthly",
+      "createdAt": 1794950317950,
+      "usedByDeviceId": null,
+      "usedByEmail": null,
+      "usedByName": null,
+      "activatedAt": null,
+      "expiresAt": null,
+      "source": "gift"
+    },
+    {
+      "code": "WES-1002",
+      "plan": "monthly",
+      "createdAt": 1794950317950,
+      "usedByDeviceId": null,
+      "usedByEmail": null,
+      "usedByName": null,
+      "activatedAt": null,
+      "expiresAt": null,
+      "source": "gift"
+    },
+    {
+      "code": "WES-1003",
+      "plan": "monthly",
+      "createdAt": 1794950317950,
+      "usedByDeviceId": null,
+      "usedByEmail": null,
+      "usedByName": null,
+      "activatedAt": null,
+      "expiresAt": null,
+      "source": "gift"
+    },
+    {
+      "code": "WES-1004",
+      "plan": "monthly",
+      "createdAt": 1794950317950,
+      "usedByDeviceId": null,
+      "usedByEmail": null,
+      "usedByName": null,
+      "activatedAt": null,
+      "expiresAt": null,
+      "source": "gift"
+    },
+    {
+      "code": "WES-1005",
+      "plan": "lifetime",
+      "createdAt": 1794950317950,
+      "usedByDeviceId": null,
+      "usedByEmail": null,
+      "usedByName": null,
+      "activatedAt": null,
+      "expiresAt": null,
+      "source": "gift"
+    }
+  ],
+  "config": {
+    "youtubeApiKey": "AIzaSyCucl4Ir00AEJI_m5Twwq7rMQCX6unEv48",
+    "rapidApiKey": "30c40ab864msh9428c5c6f9cd562p1ba935jsn0ead7f63b1c3",
+    "rapidApiHost": "youtube-mp36.p.rapidapi.com"
+  }
+}
