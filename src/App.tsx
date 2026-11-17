@@ -252,13 +252,15 @@ export default function App() {
 
       const finalTracks = combined.length > 0 ? combined : getCatalogByGenre(genreId || 'tout');
       setTracks(finalTracks);
-      setNextPageToken(data.nextPageToken || null);
-      setHasMore(Boolean(data.hasMore && data.nextPageToken));
+      const token = data.nextPageToken || 'fb_page:1';
+      setNextPageToken(token);
+      setHasMore(finalTracks.length < 250);
     } catch {
       if (reqSeq !== searchSeqRef.current) return;
       const fallback = instantCatalog.length > 0 ? instantCatalog : getCatalogByGenre(genreId || 'tout');
       setTracks(fallback);
-      setHasMore(false);
+      setNextPageToken('fb_page:1');
+      setHasMore(fallback.length < 250);
     } finally {
       if (reqSeq === searchSeqRef.current) {
         setLoadingTracks(false);
@@ -267,13 +269,14 @@ export default function App() {
   }, []);
 
   const loadMoreTracks = useCallback(async () => {
-    if (!nextPageToken || isFetchingMoreRef.current || loadingTracks) return;
+    if (isFetchingMoreRef.current || loadingTracks) return;
+    const activeToken = nextPageToken || 'fb_page:1';
     isFetchingMoreRef.current = true;
     setLoadingMore(true);
     try {
       const genreQuery = activeGenre ? `&genre=${encodeURIComponent(activeGenre)}` : '';
       const res = await fetch(
-        `/api/search?q=${encodeURIComponent(activeQuery)}${genreQuery}&pageToken=${encodeURIComponent(nextPageToken)}`
+        `/api/search?q=${encodeURIComponent(activeQuery)}${genreQuery}&pageToken=${encodeURIComponent(activeToken)}`
       );
       if (!res.ok) throw new Error('Load more failed');
       const data = (await res.json()) as {
@@ -282,22 +285,40 @@ export default function App() {
         hasMore?: boolean;
       };
       const incoming = data.tracks || [];
+      let updatedLength = 0;
       setTracks((prev) => {
         const existingIds = new Set(prev.map((t) => t.id));
         const uniqueNew = incoming.filter((t) => !existingIds.has(t.id));
-        if (uniqueNew.length > 0) return [...prev, ...uniqueNew];
-        const remainingCatalog = getCatalogByGenre('tout').filter((t) => !existingIds.has(t.id));
-        return remainingCatalog.length > 0 ? [...prev, ...remainingCatalog.slice(0, 12)] : prev;
+        let nextList: Track[];
+        if (uniqueNew.length > 0) {
+          nextList = [...prev, ...uniqueNew];
+        } else {
+          const remainingCatalog = getCatalogByGenre('tout').filter((t) => !existingIds.has(t.id));
+          nextList = remainingCatalog.length > 0 ? [...prev, ...remainingCatalog.slice(0, 25)] : prev;
+        }
+        updatedLength = nextList.length;
+        return nextList;
       });
-      setNextPageToken(data.nextPageToken || null);
-      setHasMore(Boolean(data.hasMore && data.nextPageToken && incoming.length > 0));
+      const fallbackNext = activeToken.startsWith('fb_page:')
+        ? `fb_page:${(parseInt(activeToken.replace('fb_page:', ''), 10) || 1) + 1}`
+        : 'fb_page:1';
+      const nextToken = data.nextPageToken || fallbackNext;
+      setNextPageToken(nextToken);
+      setHasMore(updatedLength < 250);
     } catch {
+      let updatedLength = 0;
       setTracks((prev) => {
         const existingIds = new Set(prev.map((t) => t.id));
         const remainingCatalog = getCatalogByGenre('tout').filter((t) => !existingIds.has(t.id));
-        return remainingCatalog.length > 0 ? [...prev, ...remainingCatalog.slice(0, 12)] : prev;
+        const nextList = remainingCatalog.length > 0 ? [...prev, ...remainingCatalog.slice(0, 25)] : prev;
+        updatedLength = nextList.length;
+        return nextList;
       });
-      setHasMore(false);
+      const fallbackNext = activeToken.startsWith('fb_page:')
+        ? `fb_page:${(parseInt(activeToken.replace('fb_page:', ''), 10) || 1) + 1}`
+        : 'fb_page:1';
+      setNextPageToken(fallbackNext);
+      setHasMore(updatedLength < 250);
     } finally {
       isFetchingMoreRef.current = false;
       setLoadingMore(false);
@@ -944,21 +965,23 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Infinite Scroll Sentinel */}
-                <div ref={loadMoreRef} className="pt-6 pb-4 flex flex-col items-center justify-center gap-2">
+                {/* Infinite Scroll Sentinel & Load More Button */}
+                <div ref={loadMoreRef} className="pt-6 pb-4 flex flex-col items-center justify-center gap-3">
                   {loadingMore && (
-                    <div className="flex items-center gap-2 text-xs sm:text-sm text-[#8B9BB4]">
+                    <div className="flex items-center gap-2 text-xs sm:text-sm text-[#38BDF8] font-medium">
                       <Loader2 className="w-4 h-4 animate-spin text-[#38BDF8]" />
-                      <span>Ap chaje 20+ lòt mizik...</span>
+                      <span>Ap chaje 25+ lòt mizik...</span>
                     </div>
                   )}
-                  {!loadingMore && hasMore && (
+                  {hasMore && (
                     <button
                       type="button"
                       onClick={loadMoreTracks}
-                      className="min-h-[42px] px-5 rounded-xl border border-white/[0.08] bg-[#0E1424]/85 backdrop-blur-md hover:border-[#38BDF8]/50 text-xs font-semibold text-[#CBD5E1] hover:text-white transition-colors"
+                      disabled={loadingMore}
+                      className="min-h-[46px] px-6 rounded-xl bg-[#2563EB] hover:bg-[#1D4ED8] disabled:opacity-60 border border-[#38BDF8]/40 text-xs sm:text-sm font-bold text-white shadow-[0_0_20px_rgba(37,99,235,0.35)] hover:shadow-[0_0_26px_rgba(56,189,248,0.45)] transition-all flex items-center gap-2"
                     >
-                      Chaje Plis Mizik
+                      {loadingMore && <Loader2 className="w-4 h-4 animate-spin" />}
+                      <span>Chaje plis mizik (+25)</span>
                     </button>
                   )}
                 </div>

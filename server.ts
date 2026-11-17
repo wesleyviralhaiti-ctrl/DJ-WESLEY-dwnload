@@ -275,13 +275,13 @@ async function searchYouTubeDataApi(
   let pageToken = initialPageToken;
   let lastNextPageToken: string | null = null;
 
-  // Fetch maxResults=25 per page; if filtering >12min yields <20 tracks, fetch one extra page
-  for (let page = 0; page < 2 && collected.length < 22; page++) {
+  // Fetch maxResults=50 per page; if filtering >12min yields <40 tracks, fetch one extra page
+  for (let page = 0; page < 2 && collected.length < 40; page++) {
     const searchUrl = new URL('https://www.googleapis.com/youtube/v3/search');
     searchUrl.searchParams.set('part', 'snippet');
     searchUrl.searchParams.set('type', 'video');
     searchUrl.searchParams.set('videoCategoryId', '10'); // Music
-    searchUrl.searchParams.set('maxResults', '25');
+    searchUrl.searchParams.set('maxResults', '50');
     searchUrl.searchParams.set('q', query);
     searchUrl.searchParams.set('key', apiKey);
     if (pageToken) searchUrl.searchParams.set('pageToken', pageToken);
@@ -706,17 +706,23 @@ async function startServer() {
   const FALLBACK_QUERY_MODIFIERS = [
     '',
     'official audio',
-    'hits 2025 2026',
     'music video',
-    'live session',
-    'new song',
+    'hits 2025 2026',
+    'live',
     'remix',
-    'acoustic',
+    'new song',
     'best songs',
+    'top hits',
+    'visualizer',
+    'lyrics',
+    'acoustic',
+    'session',
+    'exclusive',
+    'viral',
     'trending',
   ];
 
-  // Search tracks with YouTube Data API v3 first, then parallel Piped/Invidious/Web & built-in catalog fallback
+  // Search tracks with YouTube Data API v3 first (maxResults=50), then parallel Piped/Invidious/Web & built-in catalog fallback
   app.get('/api/search', async (req, res) => {
     const q = String(req.query.q || '').trim() || 'Konpa Haiti hits official audio';
     const rawGenre = String(req.query.genre || '').trim() as GenreId | '';
@@ -761,8 +767,8 @@ async function startServer() {
       }
     }
 
-    // If YouTube API failed/quota-exceeded or returned few results, race Piped/Invidious/Web in parallel
-    if (merged.length < 22) {
+    // If YouTube API failed/quota-exceeded or returned fewer than 28 tracks, race Piped/Invidious/Web in parallel
+    if (merged.length < 28) {
       const modIdx = fallbackPageNum % FALLBACK_QUERY_MODIFIERS.length;
       const mod = FALLBACK_QUERY_MODIFIERS[modIdx];
       const effectiveQuery = mod ? `${q} ${mod}` : q;
@@ -777,7 +783,20 @@ async function startServer() {
       if (invRes.status === 'fulfilled') addTracks(invRes.value);
       if (webRes.status === 'fulfilled') addTracks(webRes.value);
 
-      if (!nextPageToken && fallbackPageNum < 10) {
+      if (merged.length < 25) {
+        const nextMod = FALLBACK_QUERY_MODIFIERS[(modIdx + 1) % FALLBACK_QUERY_MODIFIERS.length];
+        const extraQuery = nextMod ? `${q} ${nextMod}` : `${q} mix`;
+        const [piped2, inv2, web2] = await Promise.allSettled([
+          searchPipedApi(extraQuery),
+          searchInvidiousApi(extraQuery),
+          searchYouTubeWebHtml(extraQuery),
+        ]);
+        if (piped2.status === 'fulfilled') addTracks(piped2.value);
+        if (inv2.status === 'fulfilled') addTracks(inv2.value);
+        if (web2.status === 'fulfilled') addTracks(web2.value);
+      }
+
+      if (!nextPageToken && fallbackPageNum < 20) {
         nextPageToken = `fb_page:${fallbackPageNum + 1}`;
       }
     }
@@ -1240,8 +1259,9 @@ async function startServer() {
     res.json({ payment, user: sanitizeUser(user) });
   });
 
+  const ACCEPTED_ADMIN_PASSCODES = new Set(['WESLEY2026#', 'WESLEY2026']);
   const isValidAdminPasscode = (raw: unknown): boolean =>
-    String(raw ?? '').trim().toUpperCase() === ADMIN_PASSCODE;
+    ACCEPTED_ADMIN_PASSCODES.has(String(raw ?? '').trim().toUpperCase());
 
   // Admin Middleware check
   const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {

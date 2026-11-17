@@ -157,9 +157,29 @@ export function savePlaylists(playlists: Playlist[]): void {
   }
 }
 
+export const DEFAULT_YOUTUBE_API_KEY =
+  'AIzaSyCucl4Ir00AEJI_m5Twwq7rMQCX6unEv48';
+export const DEFAULT_RAPIDAPI_KEY =
+  '30c40ab864msh9428c5c6f9cd562p1ba935jsn0ead7f63b1c3';
+export const DEFAULT_RAPIDAPI_HOST = 'youtube-mp36.p.rapidapi.com';
+
+export const ACCEPTED_ADMIN_PASSCODES = ['WESLEY2026#', 'WESLEY2026'] as const;
+
+export function isValidAdminPasscodeClient(raw: string | null | undefined): boolean {
+  const normalized = String(raw || '').trim().toUpperCase();
+  return normalized === 'WESLEY2026#' || normalized === 'WESLEY2026';
+}
+
 export function loadAdminPasscode(): string | null {
   try {
-    return localStorage.getItem(ADMIN_PASS_KEY);
+    const raw = localStorage.getItem(ADMIN_PASS_KEY);
+    if (!raw) return null;
+    if (isValidAdminPasscodeClient(raw)) {
+      return 'WESLEY2026#';
+    }
+    // Discard any old/stale cached passcode so WESLEY2026# always unlocks cleanly
+    localStorage.removeItem(ADMIN_PASS_KEY);
+    return null;
   } catch {
     return null;
   }
@@ -169,8 +189,8 @@ export function saveAdminPasscode(passcode: string | null): void {
   try {
     if (!passcode) {
       localStorage.removeItem(ADMIN_PASS_KEY);
-    } else {
-      localStorage.setItem(ADMIN_PASS_KEY, passcode);
+    } else if (isValidAdminPasscodeClient(passcode)) {
+      localStorage.setItem(ADMIN_PASS_KEY, 'WESLEY2026#');
     }
   } catch {
     // Ignore
