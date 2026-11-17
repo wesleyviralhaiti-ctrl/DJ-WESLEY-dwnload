@@ -1,7 +1,7 @@
 import type { GenreOption, Playlist, UserProfile } from '../types';
 
-const USER_KEY = 'wesley_music_user_v1';
-const ACCOUNTS_KEY = 'wesley_music_accounts_v1';
+const USER_KEY = 'wesley_music_user_v2';
+const ACCOUNTS_KEY = 'wesley_music_accounts_v2';
 const DEVICE_ID_KEY = 'wesley_device_id';
 const FREE_CLAIMED_DEVICES_KEY = 'wesley_free_claimed_devices';
 const PLAYLISTS_KEY = 'wesley_music_playlists_v1';
@@ -64,9 +64,15 @@ export function markDeviceFreeDownloadClaimed(deviceId: string): void {
 
 export function loadLocalUser(): UserProfile | null {
   try {
+    localStorage.removeItem('wesley_music_user_v1');
     const raw = localStorage.getItem(USER_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as UserProfile;
+    const parsed = JSON.parse(raw) as UserProfile;
+    if (!parsed || !parsed.email || !parsed.email.includes('@') || !parsed.name || parsed.name.trim().length < 2) {
+      localStorage.removeItem(USER_KEY);
+      return null;
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -76,6 +82,7 @@ export function saveLocalUser(user: UserProfile | null): void {
   try {
     if (!user) {
       localStorage.removeItem(USER_KEY);
+      localStorage.removeItem('wesley_music_user_v1');
     } else {
       localStorage.setItem(USER_KEY, JSON.stringify(user));
     }
@@ -177,7 +184,6 @@ export function loadAdminPasscode(): string | null {
     if (isValidAdminPasscodeClient(raw)) {
       return 'WESLEY2026#';
     }
-    // Discard any old/stale cached passcode so WESLEY2026# always unlocks cleanly
     localStorage.removeItem(ADMIN_PASS_KEY);
     return null;
   } catch {
