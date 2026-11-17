@@ -117,9 +117,14 @@ function readStore(): StoreData {
       vipCodes: existingCodes,
       freeClaimedDevices: Array.isArray(parsed.freeClaimedDevices) ? parsed.freeClaimedDevices : [],
       config: {
-        youtubeApiKey: parsed.config?.youtubeApiKey || DEFAULT_CONFIG.youtubeApiKey,
-        rapidApiKey: parsed.config?.rapidApiKey || DEFAULT_CONFIG.rapidApiKey,
-        rapidApiHost: parsed.config?.rapidApiHost || DEFAULT_CONFIG.rapidApiHost,
+        youtubeApiKey: parsed.config?.youtubeApiKey?.trim() || DEFAULT_CONFIG.youtubeApiKey,
+        rapidApiKey: parsed.config?.rapidApiKey?.trim() || DEFAULT_CONFIG.rapidApiKey,
+        rapidApiHost:
+          parsed.config?.rapidApiHost?.trim() &&
+          parsed.config.rapidApiHost.trim() !== 'rapidapi.com' &&
+          parsed.config.rapidApiHost.trim() !== '://rapidapi.com'
+            ? parsed.config.rapidApiHost.trim()
+            : DEFAULT_CONFIG.rapidApiHost,
       },
     };
   } catch {
@@ -255,12 +260,16 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
+let youtubeRateLimitUntil = 0;
+
 async function searchYouTubeDataApi(
   query: string,
   apiKey: string,
   initialPageToken = ''
 ): Promise<{ tracks: SearchTrackResult[]; nextPageToken: string | null }> {
-  if (!apiKey) return { tracks: [], nextPageToken: null };
+  if (!apiKey || Date.now() < youtubeRateLimitUntil) {
+    return { tracks: [], nextPageToken: null };
+  }
   const collected: SearchTrackResult[] = [];
   const seen = new Set<string>();
   let pageToken = initialPageToken;
@@ -277,9 +286,13 @@ async function searchYouTubeDataApi(
     searchUrl.searchParams.set('key', apiKey);
     if (pageToken) searchUrl.searchParams.set('pageToken', pageToken);
 
-    const searchRes = await fetchWithTimeout(searchUrl.toString(), {}, 8000);
+    const searchRes = await fetchWithTimeout(searchUrl.toString(), {}, 6000);
     if (!searchRes.ok) {
-      throw new Error(`YouTube API search failed: ${searchRes.status}`);
+      if (searchRes.status === 429 || searchRes.status === 403) {
+        // Back off YouTube Data API v3 for 10 minutes on quota/rate limit
+        youtubeRateLimitUntil = Date.now() + 10 * 60 * 1000;
+      }
+      return { tracks: collected, nextPageToken: null };
     }
     const searchJson = (await searchRes.json()) as {
       nextPageToken?: string;
@@ -743,8 +756,8 @@ async function startServer() {
         const ytResult = await searchYouTubeDataApi(q, youtubeApiKey, rawPageToken);
         addTracks(ytResult.tracks);
         nextPageToken = ytResult.nextPageToken;
-      } catch (err) {
-        console.warn('YouTube Data API fallback triggered:', (err as Error).message);
+      } catch {
+        // Silently fall back to Invidious / Piped / YouTube web & built-in catalog
       }
     }
 
@@ -1227,10 +1240,13 @@ async function startServer() {
     res.json({ payment, user: sanitizeUser(user) });
   });
 
+  const isValidAdminPasscode = (raw: unknown): boolean =>
+    String(raw ?? '').trim().toUpperCase() === ADMIN_PASSCODE;
+
   // Admin Middleware check
   const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const passcode = String(req.headers['x-admin-passcode'] || '');
-    if (passcode !== ADMIN_PASSCODE) {
+    if (!isValidAdminPasscode(passcode)) {
       return res.status(401).json({ error: 'Kòd Admin pa kòrèk.' });
     }
     next();
@@ -1238,8 +1254,8 @@ async function startServer() {
 
   app.post('/api/admin/verify', (req, res) => {
     const passcode = String(req.body?.passcode || '');
-    if (passcode === ADMIN_PASSCODE) {
-      return res.json({ verified: true });
+    if (isValidAdminPasscode(passcode)) {
+      return res.json({ verified: true, passcode: ADMIN_PASSCODE });
     }
     return res.status(401).json({ verified: false, error: 'Kòd Admin sa a pa valid.' });
   });
@@ -1429,6 +1445,7 @@ async function startServer() {
     }
     writeStore(store);
     searchCache.clear();
+    youtubeRateLimitUntil = 0;
     res.json({ config: store.config });
   });
 

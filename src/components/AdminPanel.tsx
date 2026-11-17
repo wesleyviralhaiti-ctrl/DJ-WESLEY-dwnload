@@ -27,6 +27,12 @@ interface AdminPanelProps {
   onUserUpdated: () => void;
 }
 
+const DEFAULT_API_CONFIG: ApiConfig = {
+  youtubeApiKey: 'AIzaSyCucl4Ir00AEJI_m5Twwq7rMQCX6unEv48',
+  rapidApiKey: '30c40ab864msh9428c5c6f9cd562p1ba935jsn0ead7f63b1c3',
+  rapidApiHost: 'youtube-mp36.p.rapidapi.com',
+};
+
 export const AdminPanel: React.FC<AdminPanelProps> = ({
   adminPasscode,
   onUnlock,
@@ -40,11 +46,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [payments, setPayments] = useState<PaymentRequest[]>([]);
   const [vipCodes, setVipCodes] = useState<VipCode[]>([]);
-  const [config, setConfig] = useState<ApiConfig>({
-    youtubeApiKey: '',
-    rapidApiKey: '',
-    rapidApiHost: '',
-  });
+  const [config, setConfig] = useState<ApiConfig>({ ...DEFAULT_API_CONFIG });
   const [loadingData, setLoadingData] = useState(false);
   const [savingKeys, setSavingKeys] = useState(false);
   const [keysSavedMsg, setKeysSavedMsg] = useState<string | null>(null);
@@ -78,7 +80,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       setUsers(data.users || []);
       setPayments(data.payments || []);
       setVipCodes(data.vipCodes || []);
-      if (data.config) setConfig(data.config);
+      if (data.config) {
+        setConfig({
+          youtubeApiKey: data.config.youtubeApiKey || DEFAULT_API_CONFIG.youtubeApiKey,
+          rapidApiKey: data.config.rapidApiKey || DEFAULT_API_CONFIG.rapidApiKey,
+          rapidApiHost: data.config.rapidApiHost || DEFAULT_API_CONFIG.rapidApiHost,
+        });
+      }
     } catch {
       setError('Erè pandan chajman done Admin yo.');
     } finally {
@@ -94,21 +102,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const handleUnlockSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!passInput.trim()) return;
+    const normalizedPasscode = passInput.trim().toUpperCase();
+    if (!normalizedPasscode) return;
     setVerifying(true);
     setError(null);
     try {
       const res = await fetch('/api/admin/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode: passInput.trim() }),
+        body: JSON.stringify({ passcode: normalizedPasscode }),
       });
-      if (!res.ok) {
+      const data = (await res.json()) as { verified?: boolean; passcode?: string };
+      if (!res.ok || !data.verified) {
         setError('Kòd Admin pa kòrèk. Eseye ankò.');
         setVerifying(false);
         return;
       }
-      onUnlock(passInput.trim());
+      onUnlock(data.passcode || normalizedPasscode);
       setPassInput('');
     } catch {
       setError('Erè koneksyon ak sèvè a.');
