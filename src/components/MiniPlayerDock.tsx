@@ -197,27 +197,7 @@ export const MiniPlayerDock: React.FC<MiniPlayerDockProps> = ({
         // Ignore IndexedDB miss
       }
 
-      // 2. Try direct audio stream resolution via server, fallback to YouTube IFrame API
-      try {
-        const res = await fetch(`/api/stream/${encodeURIComponent(track.id)}`);
-        if (!cancelled && res.ok) {
-          const data = (await res.json()) as { mode?: string; streamUrl?: string };
-          if (data.mode === 'audio' && data.streamUrl && audioRef.current) {
-            setEngine('audio');
-            audioRef.current.src = data.streamUrl;
-            try {
-              await audioRef.current.play();
-              setLoadingAudio(false);
-              return;
-            } catch {
-              // Fallback to YT iframe if <audio> playback is rejected
-            }
-          }
-        }
-      } catch {
-        // Fallback to YT iframe
-      }
-
+      // 2. Online playback directly via YouTube IFrame API (100% client-side)
       if (!cancelled) {
         await startYouTubeIframe(track.id);
       }

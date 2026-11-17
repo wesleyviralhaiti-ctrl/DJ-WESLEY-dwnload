@@ -24,6 +24,15 @@ import {
   DEFAULT_YOUTUBE_API_KEY,
   isValidAdminPasscodeClient,
 } from '../lib/storage';
+import {
+  createAdminVipCodeLocal,
+  getAdminOverviewLocal,
+  performAdminPaymentActionLocal,
+  performAdminUserActionLocal,
+  performAdminVipCodeActionLocal,
+  saveApiConfigLocal,
+} from '../lib/clientStore';
+import { resetYouTubeCooldown } from '../lib/youtubeClient';
 import type { ApiConfig, PaymentRequest, SubscriptionPlan, UserProfile, VipCode } from '../types';
 
 interface AdminPanelProps {
@@ -61,43 +70,26 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [newCodePlan, setNewCodePlan] = useState<SubscriptionPlan>('monthly');
   const [customCodeText, setCustomCodeText] = useState('');
   const [creatingCode, setCreatingCode] = useState(false);
+  const [vipCodeError, setVipCodeError] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
-  const fetchOverview = async (code: string) => {
+  const fetchOverview = (code: string) => {
+    if (!isValidAdminPasscodeClient(code)) {
+      onLock();
+      return;
+    }
     setLoadingData(true);
     setError(null);
-    try {
-      const res = await fetch('/api/admin/overview', {
-        headers: { 'x-admin-passcode': code },
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          onLock();
-          return;
-        }
-        throw new Error('Failed to load admin overview');
-      }
-      const data = (await res.json()) as {
-        users: UserProfile[];
-        payments: PaymentRequest[];
-        vipCodes: VipCode[];
-        config: ApiConfig;
-      };
-      setUsers(data.users || []);
-      setPayments(data.payments || []);
-      setVipCodes(data.vipCodes || []);
-      if (data.config) {
-        setConfig({
-          youtubeApiKey: data.config.youtubeApiKey || DEFAULT_API_CONFIG.youtubeApiKey,
-          rapidApiKey: data.config.rapidApiKey || DEFAULT_API_CONFIG.rapidApiKey,
-          rapidApiHost: data.config.rapidApiHost || DEFAULT_API_CONFIG.rapidApiHost,
-        });
-      }
-    } catch {
-      setError('Erè pandan chajman done Admin yo.');
-    } finally {
-      setLoadingData(false);
-    }
+    const data = getAdminOverviewLocal();
+    setUsers(data.users);
+    setPayments(data.payments);
+    setVipCodes(data.vipCodes);
+    setConfig({
+      youtubeApiKey: data.config.youtubeApiKey || DEFAULT_API_CONFIG.youtubeApiKey,
+      rapidApiKey: data.config.rapidApiKey || DEFAULT_API_CONFIG.rapidApiKey,
+      rapidApiHost: data.config.rapidApiHost || DEFAULT_API_CONFIG.rapidApiHost,
+    });
+    setLoadingData(false);
   };
 
   useEffect(() => {
@@ -106,7 +98,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   }, [adminPasscode]);
 
-  const handleUnlockSubmit = async (e: React.FormEvent) => {
+  const handleUnlockSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const normalizedPasscode = passInput.trim().toUpperCase();
     if (!normalizedPasscode) return;
@@ -118,115 +110,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
     setVerifying(true);
     setError(null);
-    try {
-      const res = await fetch('/api/admin/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode: normalizedPasscode }),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { verified?: boolean; passcode?: string };
-        if (data.verified) {
-          onUnlock(data.passcode || 'WESLEY2026#');
-          setPassInput('');
-          return;
-        }
-      }
-      // Guarantee immediate unlock if valid passcode entered even if server restarted
-      onUnlock('WESLEY2026#');
-      setPassInput('');
-    } catch {
-      onUnlock('WESLEY2026#');
-      setPassInput('');
-    } finally {
-      setVerifying(false);
-    }
+    onUnlock('WESLEY2026#');
+    setPassInput('');
+    setVerifying(false);
   };
 
-  const handleUserAction = async (
+  const handleUserAction = (
     userId: string,
     action: 'approve_monthly' | 'approve_lifetime' | 'revoke' | 'block' | 'unblock'
   ) => {
     if (!adminPasscode) return;
-    const res = await fetch('/api/admin/user-action', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-passcode': adminPasscode,
-      },
-      body: JSON.stringify({ userId, action }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { users: UserProfile[]; vipCodes?: VipCode[] };
-      setUsers(data.users || []);
-      if (data.vipCodes) setVipCodes(data.vipCodes);
-      onUserUpdated();
-    }
+    const data = performAdminUserActionLocal(userId, action);
+    setUsers(data.users);
+    setVipCodes(data.vipCodes);
+    onUserUpdated();
   };
 
-  const handlePaymentAction = async (paymentId: string, action: 'approve' | 'reject') => {
+  const handlePaymentAction = (paymentId: string, action: 'approve' | 'reject') => {
     if (!adminPasscode) return;
-    const res = await fetch('/api/admin/payment-action', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-passcode': adminPasscode,
-      },
-      body: JSON.stringify({ paymentId, action }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as {
-        users: UserProfile[];
-        payments: PaymentRequest[];
-        vipCodes?: VipCode[];
-      };
-      setUsers(data.users || []);
-      setPayments(data.payments || []);
-      if (data.vipCodes) setVipCodes(data.vipCodes);
-      onUserUpdated();
-    }
+    const data = performAdminPaymentActionLocal(paymentId, action);
+    setUsers(data.users);
+    setPayments(data.payments);
+    setVipCodes(data.vipCodes);
+    onUserUpdated();
   };
 
-  const handleCreateVipCode = async (e: React.FormEvent) => {
+  const handleCreateVipCode = (e: React.FormEvent) => {
     e.preventDefault();
     if (!adminPasscode) return;
     setCreatingCode(true);
-    try {
-      const res = await fetch('/api/admin/vip-codes', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-passcode': adminPasscode,
-        },
-        body: JSON.stringify({
-          plan: newCodePlan,
-          code: customCodeText.trim() || undefined,
-        }),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { vipCodes: VipCode[] };
-        setVipCodes(data.vipCodes || []);
-        setCustomCodeText('');
-      }
-    } finally {
-      setCreatingCode(false);
+    setVipCodeError(null);
+    const res = createAdminVipCodeLocal(newCodePlan, customCodeText.trim() || undefined);
+    if (res.ok) {
+      setVipCodes(res.vipCodes);
+      setCustomCodeText('');
+    } else {
+      setVipCodeError(res.error);
     }
+    setCreatingCode(false);
   };
 
-  const handleVipCodeAction = async (code: string, action: 'reset' | 'delete') => {
+  const handleVipCodeAction = (code: string, action: 'reset' | 'delete') => {
     if (!adminPasscode) return;
-    const res = await fetch('/api/admin/vip-codes/action', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-passcode': adminPasscode,
-      },
-      body: JSON.stringify({ code, action }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { vipCodes: VipCode[] };
-      setVipCodes(data.vipCodes || []);
-    }
+    const nextCodes = performAdminVipCodeActionLocal(code, action);
+    setVipCodes(nextCodes);
   };
 
   const copyCode = async (code: string) => {
@@ -239,29 +166,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
-  const handleSaveKeys = async (e: React.FormEvent) => {
+  const handleSaveKeys = (e: React.FormEvent) => {
     e.preventDefault();
     if (!adminPasscode) return;
     setSavingKeys(true);
     setKeysSavedMsg(null);
-    try {
-      const res = await fetch('/api/admin/config', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-passcode': adminPasscode,
-        },
-        body: JSON.stringify(config),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { config: ApiConfig };
-        setConfig(data.config);
-        setKeysSavedMsg('Kle API yo anrejistre avèk siksè.');
-        setTimeout(() => setKeysSavedMsg(null), 3500);
-      }
-    } finally {
-      setSavingKeys(false);
-    }
+    const updated = saveApiConfigLocal(config);
+    resetYouTubeCooldown();
+    setConfig(updated);
+    setKeysSavedMsg('Kle API yo anrejistre avèk siksè.');
+    setTimeout(() => setKeysSavedMsg(null), 3500);
+    setSavingKeys(false);
   };
 
   if (!adminPasscode) {
@@ -413,6 +328,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <span>+ Créer un nouveau Code VIP</span>
           </button>
         </form>
+
+        {vipCodeError && (
+          <div className="rounded-xl border border-red-500/35 bg-red-500/10 px-4 py-2.5 text-xs text-red-300">
+            {vipCodeError}
+          </div>
+        )}
 
         {/* Codes List */}
         <div className="space-y-2">

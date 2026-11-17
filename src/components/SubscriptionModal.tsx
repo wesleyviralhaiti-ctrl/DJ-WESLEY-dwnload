@@ -11,6 +11,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
+import { activateLocalVipCode, submitLocalPayment } from '../lib/clientStore';
 import type { SubscriptionPlan, UserProfile } from '../types';
 
 interface SubscriptionModalProps {
@@ -86,7 +87,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     }
   };
 
-  const handleActivateVipCode = async (e: React.FormEvent) => {
+  const handleActivateVipCode = (e: React.FormEvent) => {
     e.preventDefault();
     const cleaned = vipCodeInput.trim().toUpperCase();
     if (!cleaned) return;
@@ -94,40 +95,26 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     setVipError(null);
     setVipCelebration(null);
 
-    try {
-      const res = await fetch('/api/vip/activate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          code: cleaned,
-          email: user.email,
-          fullName: user.fullName,
-          deviceId,
-        }),
-      });
-      const data = (await res.json()) as {
-        message?: string;
-        user?: UserProfile;
-        error?: string;
-      };
-      if (!res.ok) {
-        setVipError(data.error || 'Code VIP invalide.');
-        setActivatingVip(false);
-        return;
-      }
-      if (data.user) {
-        onSubmitted(data.user);
-      }
-      setVipCelebration(data.message || '🎉 KAPBOUM ! Votre accès VIP est activé sur cet appareil !');
-      setVipCodeInput('');
-    } catch {
-      setVipError('Erreur de connexion. Vérifiez votre internet et réessayez.');
-    } finally {
+    const res = activateLocalVipCode({
+      code: cleaned,
+      email: user.email,
+      fullName: user.fullName,
+      deviceId,
+    });
+
+    if (!res.ok) {
+      setVipError(res.error);
       setActivatingVip(false);
+      return;
     }
+
+    onSubmitted(res.user);
+    setVipCelebration(res.message);
+    setVipCodeInput('');
+    setActivatingVip(false);
   };
 
-  const handleSubmitPayment = async (e: React.FormEvent) => {
+  const handleSubmitPayment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!phone.trim() || !transactionCode.trim()) {
       setError('Tanpri antre nimewo telefòn ou ak kòd tranzaksyon an.');
@@ -136,35 +123,19 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     setSubmitting(true);
     setError(null);
 
-    try {
-      const res = await fetch('/api/payments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: user.email,
-          fullName: user.fullName,
-          deviceId,
-          region,
-          phone: phone.trim(),
-          transactionCode: transactionCode.trim(),
-          plan,
-        }),
-      });
-      const json = (await res.json()) as { user?: UserProfile; error?: string };
-      if (!res.ok) {
-        setError(json.error || 'Pa kapab voye demann peman an.');
-        setSubmitting(false);
-        return;
-      }
-      if (json.user) {
-        onSubmitted(json.user);
-      }
-      setSuccessMsg('Demann peman ou an voye! Admin ap valide l rapidman.');
-    } catch {
-      setError('Erè koneksyon. Tcheke entènèt ou epi eseye ankò.');
-    } finally {
-      setSubmitting(false);
-    }
+    const res = submitLocalPayment({
+      email: user.email,
+      fullName: user.fullName,
+      deviceId,
+      region,
+      phone: phone.trim(),
+      transactionCode: transactionCode.trim(),
+      plan,
+    });
+
+    onSubmitted(res.user);
+    setSuccessMsg('Demann peman ou an voye! Admin ap valide l rapidman.');
+    setSubmitting(false);
   };
 
   return (

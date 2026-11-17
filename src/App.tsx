@@ -33,19 +33,24 @@ import {
   getCatalogByGenre,
 } from './lib/catalog';
 import {
+  claimLocalFreeDownload,
+  loginLocalUser,
+  recordLocalTrackPlay,
+  registerLocalUser,
+  syncLocalUser,
+} from './lib/clientStore';
+import {
   GENRES,
   getOrCreateDeviceId,
   isDeviceFreeDownloadClaimed,
   loadAdminPasscode,
-  loadLocalAccounts,
   loadLocalUser,
   loadPlaylists,
-  markDeviceFreeDownloadClaimed,
   saveAdminPasscode,
-  saveLocalAccount,
   saveLocalUser,
   savePlaylists,
 } from './lib/storage';
+import { downloadMp3Client, searchMusicClient } from './lib/youtubeClient';
 import type {
   AppTab,
   DownloadedTrack,
@@ -157,37 +162,19 @@ export default function App() {
     [deviceId]
   );
 
-  // Sync current user status with backend (subscription approvals / expiration / blocks)
-  const syncUserStatus = useCallback(async () => {
+  // Sync current user status locally (subscription approvals / 30-day expiration / blocks)
+  const syncUserStatus = useCallback(() => {
     if (!user?.email) return;
-    try {
-      const res = await fetch(
-        `/api/users/me?email=${encodeURIComponent(user.email)}&deviceId=${encodeURIComponent(deviceId)}`
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { user?: UserProfile; expired?: boolean };
-        if (data.user) {
-          const check = enforceLocalExpiration(data.user);
-          const normalized = normalizeFreeDownloads(check.updated);
-          setUser(normalized);
-          saveLocalUser(normalized);
-          if (data.expired || check.expired) {
-            setExpiredNotice(true);
-            setShowPaywall(true);
-          }
-        }
-      } else if (res.status === 404) {
-        const check = enforceLocalExpiration(user);
-        const normalized = normalizeFreeDownloads(check.updated);
-        setUser(normalized);
-        saveLocalUser(normalized);
-        if (check.expired) {
-          setExpiredNotice(true);
-          setShowPaywall(true);
-        }
+    const { user: synced, expired } = syncLocalUser(user.email, deviceId);
+    if (synced) {
+      const normalized = normalizeFreeDownloads(synced);
+      setUser(normalized);
+      saveLocalUser(normalized);
+      if (expired) {
+        setExpiredNotice(true);
+        setShowPaywall(true);
       }
-    } catch {
-      // Offline mode - enforce expiration locally
+    } else {
       const check = enforceLocalExpiration(user);
       const normalized = normalizeFreeDownloads(check.updated);
       if (check.expired || normalized.freeDownloadsLeft !== user.freeDownloadsLeft) {
@@ -207,7 +194,7 @@ export default function App() {
     }
   }, [user?.email, syncUserStatus]);
 
-  // Fetch initial page of tracks with instant built-in catalog seeding + YouTube/Invidious/Piped fallback
+  // Fetch initial page of tracks directly from YouTube Data API v3 + Piped/Invidious + Built-in Catalog
   const fetchTracks = useCallback(async (query: string, genreId?: GenreId) => {
     const reqSeq = ++searchSeqRef.current;
     const instantCatalog = genreId ? getCatalogByGenre(genreId) : filterBuiltInCatalog(query);
@@ -224,14 +211,7 @@ export default function App() {
     isFetchingMoreRef.current = false;
 
     try {
-      const genreQuery = genreId ? `&genre=${encodeURIComponent(genreId)}` : '';
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}${genreQuery}`);
-      if (!res.ok) throw new Error('Search failed');
-      const data = (await res.json()) as {
-        tracks?: Track[];
-        nextPageToken?: string | null;
-        hasMore?: boolean;
-      };
+      const data = await searchMusicClient({ query, genreId });
       if (reqSeq !== searchSeqRef.current) return;
 
       const live = data.tracks || [];
@@ -252,8 +232,7 @@ export default function App() {
 
       const finalTracks = combined.length > 0 ? combined : getCatalogByGenre(genreId || 'tout');
       setTracks(finalTracks);
-      const token = data.nextPageToken || 'fb_page:1';
-      setNextPageToken(token);
+      setNextPageToken(data.nextPageToken || 'fb_page:1');
       setHasMore(finalTracks.length < 250);
     } catch {
       if (reqSeq !== searchSeqRef.current) return;
@@ -274,16 +253,11 @@ export default function App() {
     isFetchingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const genreQuery = activeGenre ? `&genre=${encodeURIComponent(activeGenre)}` : '';
-      const res = await fetch(
-        `/api/search?q=${encodeURIComponent(activeQuery)}${genreQuery}&pageToken=${encodeURIComponent(activeToken)}`
-      );
-      if (!res.ok) throw new Error('Load more failed');
-      const data = (await res.json()) as {
-        tracks?: Track[];
-        nextPageToken?: string | null;
-        hasMore?: boolean;
-      };
+      const data = await searchMusicClient({
+        query: activeQuery,
+        genreId: activeGenre,
+        pageToken: activeToken,
+      });
       const incoming = data.tracks || [];
       let updatedLength = 0;
       setTracks((prev) => {
@@ -302,8 +276,7 @@ export default function App() {
       const fallbackNext = activeToken.startsWith('fb_page:')
         ? `fb_page:${(parseInt(activeToken.replace('fb_page:', ''), 10) || 1) + 1}`
         : 'fb_page:1';
-      const nextToken = data.nextPageToken || fallbackNext;
-      setNextPageToken(nextToken);
+      setNextPageToken(data.nextPageToken || fallbackNext);
       setHasMore(updatedLength < 250);
     } catch {
       let updatedLength = 0;
@@ -356,109 +329,36 @@ export default function App() {
   ): Promise<boolean> => {
     setRegisterLoading(true);
     setRegisterError(null);
-    const deviceAlreadyClaimed = isDeviceFreeDownloadClaimed(deviceId);
-    try {
-      const res = await fetch('/api/users/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fullName, email, password, deviceId, deviceAlreadyClaimed }),
-      });
-      const data = (await res.json()) as { user?: UserProfile; error?: string };
-      if (!res.ok || !data.user) {
-        setRegisterError(data.error || 'Impossible de créer le compte.');
-        setRegisterLoading(false);
-        return false;
-      }
-      const normalized = normalizeFreeDownloads(data.user);
-      saveLocalAccount({ fullName, email, password, profile: normalized });
-      setUser(normalized);
-      saveLocalUser(normalized);
-      setWelcomeFirstName(fullName.trim().split(/\s+/)[0] || fullName);
-      return true;
-    } catch {
-      const existingLocal = loadLocalAccounts().find(
-        (a) => a.email.toLowerCase() === email.toLowerCase()
-      );
-      if (existingLocal) {
-        setRegisterError('Un compte existe déjà avec cet e-mail.');
-        setRegisterLoading(false);
-        return false;
-      }
-      const fallbackUser: UserProfile = {
-        id: `usr_${Date.now()}`,
-        fullName,
-        email,
-        deviceId,
-        songsPlayed: 0,
-        subscriptionStatus: 'free',
-        expiresAt: null,
-        freeDownloadsLeft: deviceAlreadyClaimed ? 0 : 1,
-        blocked: false,
-        createdAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString(),
-      };
-      saveLocalAccount({ fullName, email, password, profile: fallbackUser });
-      setUser(fallbackUser);
-      saveLocalUser(fallbackUser);
-      setWelcomeFirstName(fullName.trim().split(/\s+/)[0] || fullName);
-      return true;
-    } finally {
+    const res = registerLocalUser({ fullName, email, password, deviceId });
+    if (!res.ok) {
+      setRegisterError(res.error);
       setRegisterLoading(false);
+      return false;
     }
+    const normalized = normalizeFreeDownloads(res.user);
+    setUser(normalized);
+    saveLocalUser(normalized);
+    setWelcomeFirstName(fullName.trim().split(/\s+/)[0] || fullName);
+    setRegisterLoading(false);
+    return true;
   };
 
   const handleLogin = async (email: string, password: string): Promise<boolean> => {
     setRegisterLoading(true);
     setRegisterError(null);
-    const deviceAlreadyClaimed = isDeviceFreeDownloadClaimed(deviceId);
-    try {
-      const res = await fetch('/api/users/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, deviceId, deviceAlreadyClaimed }),
-      });
-      const data = (await res.json()) as { user?: UserProfile; error?: string };
-      if (!res.ok || !data.user) {
-        // Check local account cache if server restarted
-        const localAcc = loadLocalAccounts().find(
-          (a) => a.email.toLowerCase() === email.toLowerCase() && a.password === password
-        );
-        if (localAcc && res.status === 404) {
-          const restored = normalizeFreeDownloads({ ...localAcc.profile, deviceId });
-          setUser(restored);
-          saveLocalUser(restored);
-          setWelcomeFirstName(restored.fullName.trim().split(/\s+/)[0] || restored.fullName);
-          return true;
-        }
-        setRegisterError(data.error || 'E-mail ou mot de passe incorrect.');
-        setRegisterLoading(false);
-        return false;
-      }
-      const check = enforceLocalExpiration(data.user);
-      const normalized = normalizeFreeDownloads(check.updated);
-      setUser(normalized);
-      saveLocalUser(normalized);
-      if (check.expired) setExpiredNotice(true);
-      setWelcomeFirstName(normalized.fullName.trim().split(/\s+/)[0] || normalized.fullName);
-      return true;
-    } catch {
-      const localAcc = loadLocalAccounts().find(
-        (a) => a.email.toLowerCase() === email.toLowerCase() && a.password === password
-      );
-      if (!localAcc) {
-        setRegisterError('Aucun compte trouvé hors-ligne pour cet e-mail.');
-        setRegisterLoading(false);
-        return false;
-      }
-      const check = enforceLocalExpiration(localAcc.profile);
-      const normalized = normalizeFreeDownloads(check.updated);
-      setUser(normalized);
-      saveLocalUser(normalized);
-      setWelcomeFirstName(normalized.fullName.trim().split(/\s+/)[0] || normalized.fullName);
-      return true;
-    } finally {
+    const res = loginLocalUser({ email, password, deviceId });
+    if (!res.ok) {
+      setRegisterError(res.error);
       setRegisterLoading(false);
+      return false;
     }
+    const normalized = normalizeFreeDownloads(res.user);
+    setUser(normalized);
+    saveLocalUser(normalized);
+    if (res.expired) setExpiredNotice(true);
+    setWelcomeFirstName(normalized.fullName.trim().split(/\s+/)[0] || normalized.fullName);
+    setRegisterLoading(false);
+    return true;
   };
 
   const handleLogout = () => {
@@ -502,11 +402,7 @@ export default function App() {
       const updated = { ...user, songsPlayed: (user.songsPlayed || 0) + 1 };
       setUser(updated);
       saveLocalUser(updated);
-      fetch('/api/users/track-play', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: user.email }),
-      }).catch(() => {});
+      recordLocalTrackPlay(user.email);
     }
   };
 
@@ -577,100 +473,19 @@ export default function App() {
     }));
 
     try {
-      const infoRes = await fetch(
-        `/api/download/${encodeURIComponent(track.id)}?title=${encodeURIComponent(track.title)}`
-      );
-      if (!infoRes.ok) {
-        throw new Error('Pa jwenn lyen MP3 a');
-      }
-      const info = (await infoRes.json()) as {
-        directLink?: string;
-        downloadUrl: string;
-        filesize?: number;
-        mimeType?: string;
-      };
-
-      setDownloadProgressMap((prev) => ({
-        ...prev,
-        [track.id]: { videoId: track.id, progress: 12, status: 'downloading' },
-      }));
-
-      const candidateUrls: string[] = [];
-      if (info.directLink) candidateUrls.push(info.directLink);
-      if (info.downloadUrl) candidateUrls.push(info.downloadUrl);
-      if (info.directLink) {
-        candidateUrls.push(`https://api.allorigins.win/raw?url=${encodeURIComponent(info.directLink)}`);
-        candidateUrls.push(`https://corsproxy.io/?${encodeURIComponent(info.directLink)}`);
-      }
-
-      let downloadedBlob: Blob | null = null;
-      let resolvedMime = info.mimeType || 'audio/mpeg';
-
-      for (const candidateUrl of candidateUrls) {
-        try {
-          const audioRes = await fetch(candidateUrl);
-          if (!audioRes.ok) continue;
-
-          const cType = (audioRes.headers.get('Content-Type') || '').toLowerCase();
-          if (cType.includes('text/html') || cType.includes('text/plain') || cType.includes('application/json')) {
-            continue;
-          }
-
-          const contentLengthHeader = audioRes.headers.get('Content-Length');
-          const totalBytes = contentLengthHeader
-            ? parseInt(contentLengthHeader, 10)
-            : info.filesize || 0;
-
-          let blob: Blob;
-          if (audioRes.body) {
-            const reader = audioRes.body.getReader();
-            const chunks: Uint8Array[] = [];
-            let received = 0;
-
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) {
-                chunks.push(value);
-                received += value.length;
-                const pct =
-                  totalBytes > 0
-                    ? Math.min(96, Math.max(15, Math.round((received / totalBytes) * 95)))
-                    : Math.min(92, 15 + Math.round(received / 65000));
-                setDownloadProgressMap((prev) => ({
-                  ...prev,
-                  [track.id]: { videoId: track.id, progress: pct, status: 'downloading' },
-                }));
-              }
-            }
-            blob = new Blob(chunks as BlobPart[], {
-              type: cType || resolvedMime,
-            });
-          } else {
-            blob = await audioRes.blob();
-          }
-
-          if (blob.size > 16384) {
-            downloadedBlob = blob;
-            if (cType && cType.startsWith('audio/')) resolvedMime = cType;
-            break;
-          }
-        } catch {
-          // Try next fallback URL
-        }
-      }
-
-      if (!downloadedBlob) {
-        throw new Error('Telechajman MP3 echwe sou tout sèvè yo');
-      }
-      const blob = downloadedBlob;
+      const { blob, mimeType } = await downloadMp3Client(track.id, (pct) => {
+        setDownloadProgressMap((prev) => ({
+          ...prev,
+          [track.id]: { videoId: track.id, progress: pct, status: 'downloading' },
+        }));
+      });
 
       setDownloadProgressMap((prev) => ({
         ...prev,
         [track.id]: { videoId: track.id, progress: 98, status: 'saving' },
       }));
 
-      await saveDownloadedTrack(track, blob, resolvedMime || blob.type || 'audio/mpeg');
+      await saveDownloadedTrack(track, blob, mimeType || blob.type || 'audio/mpeg');
       await refreshDownloads();
 
       setDownloadProgressMap((prev) => ({
@@ -679,24 +494,12 @@ export default function App() {
       }));
 
       if (isUsingFreeGift && user) {
-        markDeviceFreeDownloadClaimed(deviceId);
-        const claimedUser: UserProfile = { ...user, freeDownloadsLeft: 0 };
+        const claimedUser = claimLocalFreeDownload(user.email, deviceId) || {
+          ...user,
+          freeDownloadsLeft: 0,
+        };
         setUser(claimedUser);
         saveLocalUser(claimedUser);
-
-        const cachedAcc = loadLocalAccounts().find(
-          (a) => a.email.toLowerCase() === user.email.toLowerCase()
-        );
-        if (cachedAcc) {
-          saveLocalAccount({ ...cachedAcc, profile: claimedUser });
-        }
-
-        fetch('/api/users/claim-free-download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: user.email, deviceId }),
-        }).catch(() => {});
-
         showToast('🎉 Men premye mizik MP3 gratis ou a! Pase VIP pou telechaje san limit.');
       } else {
         showToast(`"${track.title}" sove nan Telechajman!`);
